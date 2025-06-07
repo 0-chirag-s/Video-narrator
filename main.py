@@ -18,7 +18,7 @@ import os
 from typing import List, Tuple, Dict, Any
 import logging
 from contextlib import asynccontextmanager
-import gTTS
+from gtts import gTTS
 import uuid
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
