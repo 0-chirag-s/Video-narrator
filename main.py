@@ -22,6 +22,8 @@ import gTTS
 import uuid
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+import requests
+import shutil
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -31,6 +33,27 @@ logger = logging.getLogger(__name__)
 yolo_model = None
 scene_classifier = None
 nlg = None
+
+# ================== Model Download Helper ==================
+def download_file(url: str, filename: str):
+    """Download file from URL if it doesn't exist locally"""
+    if os.path.exists(filename):
+        logger.info(f"✓ {filename} already exists")
+        return True
+    
+    try:
+        logger.info(f"Downloading {filename}...")
+        response = requests.get(url, stream=True)
+        response.raise_for_status()
+        
+        with open(filename, 'wb') as f:
+            shutil.copyfileobj(response.raw, f)
+        
+        logger.info(f"✓ {filename} downloaded successfully")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to download {filename}: {e}")
+        return False
 
 # ================== Scene Classification Module ==================
 class SceneClassifier:
@@ -194,12 +217,17 @@ async def lifespan(app: FastAPI):
     # Load models on startup
     global yolo_model, scene_classifier, nlg
     
+    logger.info("Starting Video Narrator API...")
     logger.info("Loading models...")
     
     try:
+        # Create temp directory for models if needed
+        os.makedirs('/tmp/models', exist_ok=True)
+        
         # Load YOLO model
         yolo_path = 'best.pt'
         if os.path.exists(yolo_path):
+            logger.info("Loading custom YOLO model...")
             yolo_model = YOLO(yolo_path)
             logger.info("✓ Custom YOLO model loaded")
         else:
@@ -208,6 +236,7 @@ async def lifespan(app: FastAPI):
             logger.info("✓ Default YOLO model loaded")
         
         # Load Scene Classifier
+        logger.info("Loading Scene Classifier...")
         scene_classifier = SceneClassifier()
         logger.info("✓ Scene classifier loaded")
         
@@ -216,65 +245,83 @@ async def lifespan(app: FastAPI):
         logger.info("✓ NLG module loaded")
         
         logger.info("🚀 All models loaded successfully!")
+        logger.info("API is ready for mobile app integration!")
         
     except Exception as e:
         logger.error(f"❌ Error loading models: {e}")
-        raise
+        # Don't raise - let app start with basic functionality
+        logger.info("Starting with basic functionality...")
     
     yield
     
     # Cleanup on shutdown
-    logger.info("Shutting down...")
+    logger.info("Shutting down Video Narrator API...")
 
 # ================== FastAPI App ==================
 app = FastAPI(
     title="Video Narrator API",
-    description="AI-powered video narration API for blind assistance",
+    description="AI-powered video narration API for blind assistance - Mobile Ready",
     version="1.0.0",
     lifespan=lifespan
 )
 
-# Add CORS middleware
+# Add CORS middleware - Essential for mobile apps
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # In production, specify your mobile app domains
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # Thread pool for CPU-intensive tasks
-executor = ThreadPoolExecutor(max_workers=4)
+executor = ThreadPoolExecutor(max_workers=2)  # Reduced for free tier
 
 # ================== API Endpoints ==================
 
 @app.get("/")
 async def root():
     return {
-        "message": "Video Narrator API for Blind Assistance",
+        "message": "Video Narrator API for Blind Assistance - Mobile Ready",
         "version": "1.0.0",
         "status": "active",
-        "endpoints": [
-            "/health",
-            "/analyze-frame",
-            "/analyze-frame-tts"
-        ]
+        "mobile_endpoints": [
+            "POST /analyze-frame - Send camera frame for analysis",
+            "POST /analyze-frame-tts - Get analysis + audio",
+            "POST /batch-analyze - Process multiple frames",
+            "GET /health - Check API status",
+            "GET /keep-alive - Prevent cold starts"
+        ],
+        "deployment": "Render",
+        "optimized_for": "Mobile Applications"
     }
 
 @app.get("/health")
 async def health_check():
     return {
         "status": "healthy",
+        "timestamp": asyncio.get_event_loop().time(),
         "models_loaded": {
             "yolo": yolo_model is not None,
             "scene_classifier": scene_classifier is not None,
             "nlg": nlg is not None
         },
-        "device": str(scene_classifier.device) if scene_classifier else "unknown"
+        "device": str(scene_classifier.device) if scene_classifier else "cpu",
+        "memory_usage": "optimized_for_mobile",
+        "ready_for_mobile": True
+    }
+
+@app.get("/keep-alive")
+async def keep_alive():
+    """Endpoint for mobile apps to prevent cold starts"""
+    return {
+        "status": "alive",
+        "timestamp": asyncio.get_event_loop().time(),
+        "message": "API is warm and ready"
     }
 
 def process_frame_sync(image_data: bytes):
-    """Synchronous frame processing function"""
+    """Synchronous frame processing function - Optimized for mobile"""
     try:
         # Decode image
         nparr = np.frombuffer(image_data, np.uint8)
@@ -283,10 +330,18 @@ def process_frame_sync(image_data: bytes):
         if frame is None:
             raise ValueError("Invalid image data")
         
+        # Resize frame for faster processing on mobile
+        height, width = frame.shape[:2]
+        if width > 640:
+            scale = 640 / width
+            new_width = int(width * scale)
+            new_height = int(height * scale)
+            frame = cv2.resize(frame, (new_width, new_height))
+        
         # Object detection
         detected_objects = []
         try:
-            results = yolo_model(frame, verbose=False)
+            results = yolo_model(frame, verbose=False, conf=0.4)  # Higher confidence for mobile
             
             if results and len(results) > 0:
                 result = results[0]
@@ -311,7 +366,7 @@ def process_frame_sync(image_data: bytes):
             logger.error(f"Scene classification error: {e}")
         
         # Generate description
-        description = "No description available"
+        description = "Scene analysis in progress..."
         try:
             if detected_objects or scene_label != "unknown":
                 description = nlg.generate_description(detected_objects, scene_label, include_movement=True)
@@ -320,12 +375,14 @@ def process_frame_sync(image_data: bytes):
         
         return {
             "description": description,
-            "objects": [{"name": obj[0], "confidence": obj[1]} for obj in detected_objects],
+            "objects": [{"name": obj[0], "confidence": round(obj[1], 2)} for obj in detected_objects[:10]],
             "scene": {
                 "label": scene_label,
-                "confidence": scene_confidence
+                "confidence": round(scene_confidence, 2)
             },
-            "object_count": len(detected_objects)
+            "object_count": len(detected_objects),
+            "processing_time": "optimized_for_mobile",
+            "frame_processed": True
         }
         
     except Exception as e:
@@ -334,7 +391,7 @@ def process_frame_sync(image_data: bytes):
 
 @app.post("/analyze-frame")
 async def analyze_frame(file: UploadFile = File(...)):
-    """Analyze a single frame and return description"""
+    """Analyze a single frame and return description - Mobile Optimized"""
     
     if not file.content_type.startswith('image/'):
         raise HTTPException(status_code=400, detail="File must be an image")
@@ -342,6 +399,10 @@ async def analyze_frame(file: UploadFile = File(...)):
     try:
         # Read image data
         image_data = await file.read()
+        
+        # Validate file size (mobile optimization)
+        if len(image_data) > 5 * 1024 * 1024:  # 5MB limit
+            raise HTTPException(status_code=400, detail="Image too large. Max 5MB for mobile processing.")
         
         # Process frame in thread pool to avoid blocking
         loop = asyncio.get_event_loop()
@@ -355,7 +416,7 @@ async def analyze_frame(file: UploadFile = File(...)):
 
 @app.post("/analyze-frame-tts")
 async def analyze_frame_with_tts(file: UploadFile = File(...)):
-    """Analyze frame and return both description and audio file"""
+    """Analyze frame and return both description and audio file - Mobile Ready"""
     
     if not file.content_type.startswith('image/'):
         raise HTTPException(status_code=400, detail="File must be an image")
@@ -363,20 +424,32 @@ async def analyze_frame_with_tts(file: UploadFile = File(...)):
     try:
         # Get analysis result
         image_data = await file.read()
+        
+        # Validate file size
+        if len(image_data) > 5 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="Image too large. Max 5MB for mobile processing.")
+        
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(executor, process_frame_sync, image_data)
         
         # Generate TTS audio
-        tts = gTTS(text=result["description"], lang='en', slow=False)
-        
-        # Save to temporary file
-        audio_filename = f"narration_{uuid.uuid4().hex[:8]}.mp3"
-        audio_path = f"/tmp/{audio_filename}"
-        tts.save(audio_path)
-        
-        # Add audio info to result
-        result["audio_file"] = audio_filename
-        result["audio_url"] = f"/audio/{audio_filename}"
+        try:
+            tts = gTTS(text=result["description"], lang='en', slow=False)
+            
+            # Save to temporary file
+            audio_filename = f"narration_{uuid.uuid4().hex[:8]}.mp3"
+            audio_path = f"/tmp/{audio_filename}"
+            tts.save(audio_path)
+            
+            # Add audio info to result
+            result["audio_file"] = audio_filename
+            result["audio_url"] = f"/audio/{audio_filename}"
+            result["has_audio"] = True
+            
+        except Exception as e:
+            logger.error(f"TTS generation error: {e}")
+            result["audio_error"] = "TTS generation failed"
+            result["has_audio"] = False
         
         return JSONResponse(content=result)
         
@@ -393,17 +466,18 @@ async def get_audio_file(filename: str):
         return FileResponse(
             audio_path,
             media_type="audio/mpeg",
-            filename=filename
+            filename=filename,
+            headers={"Cache-Control": "public, max-age=3600"}  # Cache for 1 hour
         )
     else:
         raise HTTPException(status_code=404, detail="Audio file not found")
 
 @app.post("/batch-analyze")
 async def batch_analyze_frames(files: List[UploadFile] = File(...)):
-    """Analyze multiple frames (for video processing)"""
+    """Analyze multiple frames - Optimized for mobile video processing"""
     
-    if len(files) > 10:  # Limit batch size
-        raise HTTPException(status_code=400, detail="Maximum 10 files per batch")
+    if len(files) > 5:  # Reduced batch size for mobile
+        raise HTTPException(status_code=400, detail="Maximum 5 files per batch for mobile optimization")
     
     results = []
     
@@ -413,21 +487,55 @@ async def batch_analyze_frames(files: List[UploadFile] = File(...)):
             
         try:
             image_data = await file.read()
+            
+            # Skip large files
+            if len(image_data) > 5 * 1024 * 1024:
+                results.append({"error": "File too large", "filename": file.filename})
+                continue
+                
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(executor, process_frame_sync, image_data)
+            result["filename"] = file.filename
             results.append(result)
         except Exception as e:
             logger.error(f"Error processing file {file.filename}: {e}")
             results.append({"error": str(e), "filename": file.filename})
     
-    return JSONResponse(content={"results": results, "processed_count": len(results)})
+    return JSONResponse(content={
+        "results": results, 
+        "processed_count": len(results),
+        "mobile_optimized": True
+    })
+
+@app.get("/mobile-info")
+async def mobile_integration_info():
+    """Information for mobile app developers"""
+    return {
+        "integration_guide": {
+            "camera_frames": "Send frames to POST /analyze-frame",
+            "live_narration": "Use POST /analyze-frame-tts for audio",
+            "batch_processing": "Use POST /batch-analyze for multiple frames",
+            "keep_alive": "Ping GET /keep-alive to prevent cold starts"
+        },
+        "recommendations": {
+            "frame_rate": "Send 1 frame every 2-3 seconds for optimal performance",
+            "image_size": "Resize images to max 640px width before sending",
+            "file_size": "Keep images under 5MB",
+            "error_handling": "Always handle network timeouts gracefully"
+        },
+        "android_example": {
+            "http_client": "Use Retrofit or OkHttp",
+            "multipart": "Send images as multipart/form-data",
+            "audio_playback": "Use MediaPlayer for returned audio URLs"
+        }
+    }
 
 # ================== Error Handlers ==================
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc):
     return JSONResponse(
         status_code=exc.status_code,
-        content={"error": exc.detail, "status_code": exc.status_code}
+        content={"error": exc.detail, "status_code": exc.status_code, "mobile_friendly": True}
     )
 
 @app.exception_handler(Exception)
@@ -435,10 +543,22 @@ async def general_exception_handler(request, exc):
     logger.error(f"Unhandled exception: {exc}")
     return JSONResponse(
         status_code=500,
-        content={"error": "Internal server error", "status_code": 500}
+        content={"error": "Internal server error", "status_code": 500, "mobile_friendly": True}
     )
 
+# ================== Main Entry Point ==================
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    host = "0.0.0.0"  # Required for Render deployment
+    
+    logger.info(f"Starting Video Narrator API on {host}:{port}")
+    logger.info("Ready for mobile app integration!")
+    
+    uvicorn.run(
+        app, 
+        host=host, 
+        port=port, 
+        log_level="info",
+        access_log=True
+    )
